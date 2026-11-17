@@ -24,6 +24,18 @@ export function readDraftState(data: Record<string, unknown>): DraftState | null
   return state;
 }
 
+/** Render-Pfad-Guard (Incident 1 / Groundhog Day): ein Draft mit baseRevision
+ *  ungleich der aktuellen Base-Revision — oder mit anderem Baseninhalt — ist
+ *  veraltet. Veraltete strukturierte Drafts dürfen NICHT über neueren Repo-Inhalt
+ *  gerendert werden; publish.ts lehnt sie mit stale_entry ab (gleiche Prüfung). */
+export function isStaleDraft(
+  state: DraftState,
+  baseData: Record<string, unknown> | null,
+  baseRevision: number,
+): boolean {
+  return state.baseRevision !== baseRevision || !sameContent(state.baseData, baseData);
+}
+
 /** Object key ordering is not a content change. Arrays retain their order. */
 export function sameContent(a: unknown, b: unknown): boolean {
   if (a === b) return true;

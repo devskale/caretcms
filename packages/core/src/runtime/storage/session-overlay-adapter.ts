@@ -1,4 +1,4 @@
-import { DRAFT_STATE_KEY, PUBLISH_RECOVERY_KEY, contentWithoutState, readDraftState } from "../draft-state.js";
+import { DRAFT_STATE_KEY, PUBLISH_RECOVERY_KEY, contentWithoutState, isStaleDraft, readDraftState } from "../draft-state.js";
 import type {
   CollectionMetadata,
   EntryCommit,
@@ -74,6 +74,13 @@ export class SessionOverlayAdapter implements StorageAdapter {
     const base = await this.base.getEntry(collection, id);
     const state = readDraftState(overlaid.data);
     const content = contentWithoutState(overlaid.data);
+    // Stale-draft guard (Incident 1, "Groundhog Day"): a draft based on an
+    // older base revision never renders over newer repo content — the repo
+    // entry is served instead, the overlay keeps the draft for the editor
+    // (banner/conflict) and publish.ts still applies its stale_entry check.
+    if (state && base && isStaleDraft(state, base.data, await this.base.getRevision(collection, id))) {
+      return base;
+    }
     return { ...overlaid, data: state?.structured || !base ? content : { ...base.data, ...content } };
   }
 
