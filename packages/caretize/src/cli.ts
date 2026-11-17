@@ -9,10 +9,10 @@
  */
 
 import { createInterface } from "node:readline";
-import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { parseAstro } from "./parse.js";
 import { discoverAstroFiles } from "./discover.js";
 import { preflight } from "./preflight.js";
@@ -521,6 +521,93 @@ async function offerEscalation(
 }
 
 /** Restore the most recent backup, reporting how many files came back. */
+/* caret doctor — Gesundheits-Check nach den TIMOS-Vorfällen (17.11.):
+ * 1. Version/Migration (0.5 → 0.6 brach API/Studio-URLs)
+ * 2. Draft-Store: hängengebliebene Editor-Sessions (Groundhog-Day-Quelle!)
+ * 3. Uncommittete src/content-Änderungen (Publish-Infektionsvektor)
+ * 4. Config-Datei auffindbar + parsebar
+ * Exit 1 nur bei echten Fehlern; Warnungen sind Hinweise. */
+function runDoctor(root: string): void {
+  const problems: string[] = [];
+  const warn: string[] = [];
+  process.stdout.write("caret doctor — Prüft Setup, Draft-Store und Git-Zustand\n\n");
+
+  // 1) Version der installierten Core
+  const corePkgPath = join(root, "node_modules", "@caretcms", "core", "package.json");
+  try {
+    const corePkg = JSON.parse(readFileSync(corePkgPath, "utf8")) as { version?: string };
+    process.stdout.write(`✓ @caretcms/core installiert: v${corePkg.version ?? "?"}\n`);
+    const major = Number((corePkg.version ?? "0").split(".")[0]);
+    if (major < 0) warn.push("Versionsformat unerwartet");
+  } catch {
+    problems.push("@caretcms/core nicht in node_modules gefunden — `npm install` gelaufen?");
+  }
+
+  // 2) Config-Datei (findConfigName kennt die erlaubten Namen)
+  const cfg = findConfigName(root);
+  if (cfg) {
+    try {
+      readFileSync(join(root, cfg), "utf8");
+      process.stdout.write(`✓ Config: ${cfg}\n`);
+    } catch (e) {
+      problems.push(`Config ${cfg} nicht lesbar: ${String(e).split("\n")[0]}`);
+    }
+  } else {
+    warn.push("Keine Caret-Config gefunden (caretize init erzeugt sie)");
+  }
+
+  // 3) Draft-Store: Editor-Session-Verzeichnisse + Alter
+  const draftsDir = join(root, ".caret", "drafts");
+  try {
+    const editors = readdirSync(draftsDir, { withFileTypes: true }).filter((d) => d.isDirectory());
+    if (editors.length === 0) {
+      process.stdout.write("✓ Draft-Store: leer (kein Groundhog-Day-Risiko)\n");
+    } else {
+      const now = Date.now();
+      let staleCount = 0;
+      for (const ed of editors) {
+        const edPath = join(draftsDir, ed.name);
+        try {
+          const stat = statSync(edPath);
+          const ageHours = Math.round((now - stat.mtimeMs) / 3_600_000);
+          if (ageHours >= 24) {
+            staleCount += 1;
+            warn.push(`Stale Draft-Session "${ed.name}" (zuletzt vor ${ageHours} h geändert) — ` +
+              `alte Drafts über-rendern Repo-Inhalte → löschen: rm -rf ${edPath}`);
+          } else {
+            process.stdout.write(`• Draft-Session "${ed.name}" aktiv (vor ${ageHours} h)\n`);
+          }
+        } catch { /* entry verschwunden — egal */ }
+      }
+      if (staleCount === 0) process.stdout.write("✓ Draft-Store: keine über 24 h alten Sessions\n");
+    }
+  } catch {
+    process.stdout.write("✓ Draft-Store: nicht vorhanden (.caret/drafts fehlt — kein Risiko)\n");
+  }
+
+  // 4) Uncommittete Content-Änderungen (Publish-Infektionsvektor)
+  try {
+    const stdout = String(execSync("git status --porcelain -- src/content", { cwd: root, encoding: "utf8" }));
+    if (stdout.trim()) {
+      const lines = stdout.trim().split("\n").length;
+      warn.push(`${lines} uncommittete src/content-Änderung(en) — vor einem CMS-Publish committen, ` +
+        `sonst kann Publish Template-Stand überarbeiten`);
+    } else {
+      process.stdout.write("✓ src/content: keine uncommitteten Änderungen\n");
+    }
+  } catch {
+    warn.push("git status fehlgeschlagen — ist das Projekt ein Git-Repo?");
+  }
+
+  process.stdout.write("\n");
+  for (const w of warn) process.stdout.write(`⚠ ${w}\n`);
+  if (problems.length) {
+    for (const p of problems) process.stdout.write(`✗ ${p}\n`);
+    process.exit(1);
+  }
+  process.stdout.write("doctor: keine blockierenden Probleme.\n");
+}
+
 function runRestore(root: string): void {
   const restored = restoreLatest(root);
   process.stdout.write(
@@ -677,6 +764,7 @@ async function main(): Promise<void> {
 
   const root = process.cwd();
 
+  if (args.doctor) { runDoctor(root); return; }
   if (args.restore) { runRestore(root); return; }
   if (args.init) { await runInit(root, args); return; }
 

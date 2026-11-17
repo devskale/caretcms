@@ -36,6 +36,8 @@ export interface Args {
   /** `caretize init` — wire CaretCMS into the project (deps + astro.config +
    *  .env) before tagging, instead of just warning that it isn't set up. */
   init: boolean;
+  /** `caretize --doctor` — Gesundheits-Check nach den TIMOS-Vorfällen. */
+  doctor: boolean;
   help: boolean;
   version: boolean;
 }
@@ -93,7 +95,7 @@ export function parseArgs(argv: string[]): Args {
   const a: Args = {
     dryRun: false, diff: false, yes: false, review: false, minConfidence: "high",
     noImages: false, rich: false, richClass: false, noProps: false, bindCollections: false,
-    bindRoutes: false, all: false, restore: false, init: false, help: false, version: false,
+    bindRoutes: false, all: false, restore: false, init: false, doctor: false, help: false, version: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -111,6 +113,7 @@ export function parseArgs(argv: string[]): Args {
       case "--all": case "--everything": a.all = true; break;
       case "--restore": a.restore = true; break;
       case "init": a.init = true; break;
+      case "--doctor": a.doctor = true; break;
       case "--help": case "-h": a.help = true; break;
       case "--version": case "-v": a.version = true; break;
       case "--min-confidence": {
