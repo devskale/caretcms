@@ -80,6 +80,15 @@ function injectSigninHint(html: string, mountPath: string): string {
   return html.slice(0, closeBody) + snippet + html.slice(closeBody);
 }
 
+const PREVIEW_COOKIE = "caret_preview";
+
+/** Whether this request opted into draft preview (the editor toggles a cookie).
+ *  Only meaningful for an authenticated editor — the overlay install also
+ *  requires a valid editor id. */
+function isPreviewRequest(context: Pick<MiddlewareContext, "cookies">): boolean {
+  return context.cookies?.get(PREVIEW_COOKIE)?.value === "1";
+}
+
 async function resolveRuntimeEnv(): Promise<Record<string, unknown> | null> {
   if (_cachedRuntimeEnv !== undefined) return _cachedRuntimeEnv;
   try {
@@ -178,12 +187,13 @@ async function prepareRequest(
     if (services.uploadHandler.makeSessionWrapper) {
       uploadHandler = await services.uploadHandler.makeSessionWrapper(sessionId);
     }
-  } else if ((services.delivery.mode === "static" || policyActive) && services.adapter.makeEditorOverlay) {
-    // Draft modes: with static delivery or an authorization policy, an
-    // authenticated editor reads and writes through their per-editor overlay
-    // on every route, the Studio included, while the public site keeps seeing
-    // the base. Keyed by the editor id from the session; without one there is
-    // no editor, so the base adapter stays. Publish flushes the overlay.
+  } else if ((services.delivery.mode === "static" || policyActive || isPreviewRequest(authContext)) && services.adapter.makeEditorOverlay) {
+    // Draft modes: with static delivery, an authorization policy, or an
+    // editor's preview opt-in (cookie), an authenticated editor reads and
+    // writes through their per-editor overlay on every route, the Studio
+    // included, while the public site keeps seeing the base. Keyed by the
+    // editor id from the session; without one there is no editor, so the base
+    // adapter stays. Publish flushes the overlay.
     const id = identity?.id
       ?? (services.identityAdapter ? null : getEditorId(authContext));
     if (id) {
