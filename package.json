@@ -18,8 +18,7 @@
     "packages/core/LICENSE"
   ],
   "scripts": {
-    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
-    "prepack": "npm run build:core",
+    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true; npm run build:core",
     "dev:starter": "npm run dev -w @caretcms/example-starter",
     "dev:content": "npm run dev -w @caretcms/example-content-site",
     "build:core": "npm run -w @caretcms/core build",
