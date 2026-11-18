@@ -15,7 +15,10 @@
     "packages/core/editor-runtime.d.ts",
     "packages/core/package.json",
     "packages/core/README.md",
-    "packages/core/LICENSE"
+    "packages/core/LICENSE",
+    "packages/core/tsconfig.json",
+    "packages/core/tsconfig.build.json",
+    "packages/core/scripts"
   ],
   "devDependencies": {
     "typescript": "6.0.3"
