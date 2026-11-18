@@ -21,10 +21,20 @@
     "packages/core/scripts"
   ],
   "devDependencies": {
-    "typescript": "6.0.3"
+    "@astrojs/check": "0.9.9",
+    "@astrojs/markdown-satteri": "0.3.7",
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/vite": "4.3.2",
+    "astro": "7.2.4",
+    "fast-check": "^4.8.0",
+    "tailwindcss": "4.3.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
   },
   "scripts": {
-    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true; npm run build:core",
+    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
+    "prepack": "npm run build:core",
     "dev:starter": "npm run dev -w @caretcms/example-starter",
     "dev:content": "npm run dev -w @caretcms/example-content-site",
     "build:core": "npm run -w @caretcms/core build",
@@ -61,19 +71,67 @@
     "node": ">=22.12.0",
     "npm": ">=10.0.0"
   },
-  "devDependencies": {
-    "@astrojs/check": "0.9.9",
-    "@astrojs/markdown-satteri": "0.3.7",
-    "@axe-core/playwright": "4.13.0",
-    "@playwright/test": "^1.61.1",
-    "@tailwindcss/vite": "4.3.2",
-    "astro": "7.2.4",
-    "fast-check": "^4.8.0",
-    "tailwindcss": "4.3.2",
-    "typescript": "6.0.3",
-    "vitest": "4.1.10"
-  },
   "overrides": {
     "vite": "^8"
+  },
+  "main": "./packages/core/dist/index.js",
+  "types": "./packages/core/dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./packages/core/dist/index.d.ts",
+      "import": "./packages/core/dist/index.js"
+    },
+    "./loader": {
+      "types": "./packages/core/dist/loader.d.ts",
+      "import": "./packages/core/dist/loader.js"
+    },
+    "./runtime": {
+      "types": "./packages/core/dist/runtime/index.d.ts",
+      "import": "./packages/core/dist/runtime/index.js"
+    },
+    "./providers/storage/filesystem": {
+      "types": "./packages/core/dist/providers/storage/filesystem.d.ts",
+      "import": "./packages/core/dist/providers/storage/filesystem.js"
+    },
+    "./providers/storage/markdown": {
+      "types": "./packages/core/dist/providers/storage/markdown.d.ts",
+      "import": "./packages/core/dist/providers/storage/markdown.js"
+    },
+    "./providers/uploads/local": {
+      "types": "./packages/core/dist/providers/uploads/local.d.ts",
+      "import": "./packages/core/dist/providers/uploads/local.js"
+    },
+    "./providers/deployment/simulated": {
+      "types": "./packages/core/dist/providers/deployment/simulated.d.ts",
+      "import": "./packages/core/dist/providers/deployment/simulated.js"
+    },
+    "./providers/deployment/github": {
+      "types": "./packages/core/dist/providers/deployment/github.d.ts",
+      "import": "./packages/core/dist/providers/deployment/github.js"
+    },
+    "./contracts": {
+      "types": "./packages/core/dist/contracts.d.ts",
+      "import": "./packages/core/dist/contracts.js"
+    },
+    "./schema-registry": {
+      "types": "./packages/core/dist/runtime/schema-registry.d.ts",
+      "import": "./packages/core/dist/runtime/schema-registry.js"
+    },
+    "./schema-utils": {
+      "types": "./packages/core/dist/schema-utils.d.ts",
+      "import": "./packages/core/dist/schema-utils.js"
+    },
+    "./testing/storage": {
+      "types": "./packages/core/dist/testing/storage-conformance.d.ts",
+      "import": "./packages/core/dist/testing/storage-conformance.js"
+    },
+    "./browser-runtime": {
+      "types": "./packages/core/dist/browser-runtime.d.ts",
+      "import": "./packages/core/dist/browser-runtime.js"
+    },
+    "./editor-runtime": {
+      "types": "./packages/core/editor-runtime.d.ts",
+      "import": "./packages/core/editor-runtime.js"
+    }
   }
 }
