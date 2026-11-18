@@ -1,0 +1,281 @@
+export const prerender = false;
+import { hasConfiguredEditorPassword, isDevEditorPasswordActive, isEditorAuthenticated, missingProductionSettings, } from "../auth/session.js";
+import { sanitizeRedirect } from "../auth/cookie-utils.js";
+import { getRuntimeConfig } from "../config.js";
+import { getRuntimeServices } from "../providers.js";
+function escapeHtml(value) {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+function serializeJsonForScript(value) {
+    return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+function renderBrandMark(logoUrl) {
+    if (logoUrl) {
+        return `<img src="${escapeHtml(logoUrl)}" alt="" class="studio-login-mark" style="object-fit: contain;" />`;
+    }
+    return `<div class="studio-login-mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 2L2 9l10 13 10-13L12 2zm0 3.84L18.26 9 12 17.65 5.74 9 12 5.84z"/>
+    </svg>
+  </div>`;
+}
+function renderLogin(opts) {
+    const { hasPassword: passwordSet, devActive, missingSettings, apiBasePath, redirectTo, editorHome, brandName, brandLogo, faviconUrl, themeCssHref, studioCssHref, loginCssHref, showError, locale, messages, } = opts;
+    // Sign-in works once production has every setting it needs.
+    const hasPassword = passwordSet && missingSettings.length === 0;
+    const safeBrand = escapeHtml(brandName);
+    const safeRedirect = escapeHtml(redirectTo);
+    const safeEditorHome = escapeHtml(editorHome);
+    const statusNote = !hasPassword
+        ? messages["login.noPassword"]
+        : devActive
+            ? messages["login.devPassword"]
+            : messages["login.status"];
+    // When no password is configured the form is disabled, so give the developer
+    // an actionable setup guide instead of a dead end. When a dev fallback is
+    // active the form works — just nudge them toward a permanent password.
+    const docsUrl = "https://caretcms.com/docs";
+    let helperBlock = "";
+    if (missingSettings.length) {
+        // Production: name exactly what's missing, as settings on the host.
+        const lines = missingSettings.map((name) => name === "CARET_SESSION_SECRET" ? `${name}=<output of: openssl rand -base64 32>` : `${name}=<choose a strong password>`);
+        helperBlock = `
+        <div class="studio-login-setup">
+          <p class="studio-login-setup-title">Finish setting up Caret</p>
+          <ol>
+            <li>
+              Set ${missingSettings.length === 1 ? "this setting" : "these settings"} where the site runs (your host's environment variables):
+              <div class="studio-login-setup-snippet-row">
+                <code id="caret-env-snippet" class="studio-login-setup-snippet">${escapeHtml(lines.join("\n"))}</code>
+                <button type="button" id="caret-copy-env" class="studio-login-setup-copy">Copy</button>
+              </div>
+            </li>
+            <li>Restart or redeploy the site, then refresh this page</li>
+          </ol>
+          <a href="${docsUrl}" class="studio-login-setup-link">Read the setup guide &rarr;</a>
+        </div>`;
+    }
+    else if (!hasPassword) {
+        helperBlock = `
+        <div class="studio-login-setup">
+          <p class="studio-login-setup-title">Finish setting up Caret</p>
+          <ol>
+            <li>Create a <code>.env</code> file in your project root</li>
+            <li>
+              Add this line:
+              <div class="studio-login-setup-snippet-row">
+                <code id="caret-env-snippet" class="studio-login-setup-snippet">CARET_EDIT_PASSWORD=your-password</code>
+                <button type="button" id="caret-copy-env" class="studio-login-setup-copy">Copy</button>
+              </div>
+            </li>
+            <li>Restart the dev server, then refresh this page</li>
+          </ol>
+          <a href="${docsUrl}" class="studio-login-setup-link">Read the setup guide &rarr;</a>
+        </div>`;
+    }
+    else if (devActive) {
+        helperBlock = `
+        <div class="studio-login-setup studio-login-setup--dev">
+          To set your own password, add <code>CARET_EDIT_PASSWORD</code> to a <code>.env</code> file and restart.
+        </div>`;
+    }
+    const favicon = faviconUrl
+        ? `<link rel="icon" href="${escapeHtml(faviconUrl)}" />`
+        : "";
+    return `<!doctype html>
+<html lang="${escapeHtml(locale)}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>${safeBrand} — ${escapeHtml(messages["login.title"])}</title>
+    ${favicon}
+    <link rel="stylesheet" href="${themeCssHref}" />
+    <link rel="stylesheet" href="${studioCssHref}" />
+    <link rel="stylesheet" href="${loginCssHref}" />
+  </head>
+  <body class="studio-login-page">
+    <div class="studio-login-bg"></div>
+    <div class="studio-login-grid"></div>
+    <div class="studio-login-accent-top"></div>
+
+    <main class="studio-login-card">
+      <div class="studio-login-card-glow"></div>
+
+      <div class="studio-login-card-body">
+        <span class="studio-corner studio-corner-h studio-corner-tl-h"></span>
+        <span class="studio-corner studio-corner-v studio-corner-tl-v"></span>
+        <span class="studio-corner studio-corner-h studio-corner-tr-h"></span>
+        <span class="studio-corner studio-corner-v studio-corner-tr-v"></span>
+        <span class="studio-corner studio-corner-h studio-corner-bl-h"></span>
+        <span class="studio-corner studio-corner-v studio-corner-bl-v"></span>
+        <span class="studio-corner studio-corner-h studio-corner-br-h"></span>
+        <span class="studio-corner studio-corner-v studio-corner-br-v"></span>
+
+        <div class="studio-login-header">
+          ${renderBrandMark(brandLogo)}
+          <h1 class="studio-login-title">${safeBrand}</h1>
+          <p class="studio-login-tagline">${escapeHtml(statusNote)}</p>
+        </div>
+
+        <div id="login-error" class="studio-login-error" role="alert"${showError ? "" : " hidden"}>
+          <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+          </svg>
+          <span id="login-error-text">${escapeHtml(messages["login.invalid"])}</span>
+        </div>
+
+        <form id="login-form" class="studio-login-form" method="POST" action="${escapeHtml(`${apiBasePath}/auth/login`)}">
+          <input type="hidden" name="redirect" value="${safeRedirect}" />
+
+          <div class="studio-login-field">
+            <label for="password">${escapeHtml(messages["login.password"])}</label>
+            <div class="studio-login-input-wrap">
+              <input
+                type="password"
+                id="password"
+                name="password"
+                required
+                autocomplete="current-password"
+                class="studio-login-input"
+                placeholder="${escapeHtml(messages["login.placeholder"])}"
+                ${hasPassword ? "autofocus" : "disabled"}
+              />
+              <svg class="studio-login-input-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+              </svg>
+            </div>
+          </div>
+
+          <button type="submit" class="studio-login-submit" ${hasPassword ? "" : "disabled"}>
+            <span class="studio-login-submit-content">
+              <span>${escapeHtml(messages["login.submit"])}</span>
+              <svg class="studio-login-submit-arrow" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+              </svg>
+            </span>
+          </button>
+        </form>
+        ${helperBlock}
+
+        <div class="studio-login-footer">
+          <a href="${safeEditorHome}">${escapeHtml(messages["login.back"])}</a>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        var copyBtn = document.getElementById('caret-copy-env');
+        var snippet = document.getElementById('caret-env-snippet');
+        if (copyBtn && snippet && navigator.clipboard && navigator.clipboard.writeText) {
+          copyBtn.addEventListener('click', function () {
+            navigator.clipboard.writeText(snippet.textContent || '').then(function () {
+              var prev = copyBtn.textContent;
+              copyBtn.textContent = 'Copied';
+              setTimeout(function () { copyBtn.textContent = prev; }, 1500);
+            }).catch(function () {});
+          });
+        }
+
+        var form = document.getElementById('login-form');
+        var error = document.getElementById('login-error');
+        var errorText = document.getElementById('login-error-text');
+        if (!form) return;
+
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          if (error) error.hidden = true;
+
+          var btn = form.querySelector('button[type="submit"]');
+          if (btn) btn.disabled = true;
+
+          var fd = new FormData(form);
+          var headers = { 'Accept': 'application/json', 'x-caret-request': '1' };
+
+          fetch(form.action, {
+            method: 'POST',
+            body: fd,
+            headers: headers,
+            credentials: 'same-origin'
+          })
+            .then(function (res) {
+              return res.json().catch(function () { return { error: ${serializeJsonForScript(messages["login.failed"])} }; })
+                .then(function (data) { return { ok: res.ok, data: data }; });
+            })
+            .then(function (result) {
+              if (result.ok && result.data && result.data.redirect) {
+                try { sessionStorage.setItem('caret:welcome', '1'); } catch (e) {}
+                window.location.href = result.data.redirect;
+                return;
+              }
+              if (errorText && result.data && result.data.error) {
+                errorText.textContent = result.data.error;
+              }
+              if (error) error.hidden = false;
+              if (btn) btn.disabled = false;
+            })
+            .catch(function () {
+              if (error) error.hidden = false;
+              if (btn) btn.disabled = false;
+            });
+        });
+      })();
+    </script>
+  </body>
+</html>`;
+}
+function html(content, status = 200, setCookie) {
+    const headers = {
+        "Content-Type": "text/html; charset=utf-8",
+    };
+    if (setCookie)
+        headers["Set-Cookie"] = setCookie;
+    return new Response(content, { status, headers });
+}
+export async function GET(context) {
+    const runtime = getRuntimeConfig();
+    // Default post-login landing is the live site so the inline editor activates
+    // immediately (Caret is inline-first). The Studio stays reachable at
+    // `${mountPath}/cms`, and a `?redirect=` param still overrides this.
+    const redirectTarget = sanitizeRedirect(context.url.searchParams.get("redirect"), runtime.editorHome);
+    if (isEditorAuthenticated(context)) {
+        return new Response(null, {
+            status: 302,
+            headers: { Location: redirectTarget },
+        });
+    }
+    const identityAdapter = (await getRuntimeServices()).identityAdapter;
+    if (identityAdapter) {
+        const location = await identityAdapter.loginUrl({
+            request: context.request,
+            redirectTo: redirectTarget,
+        });
+        return new Response(null, { status: 302, headers: { Location: location } });
+    }
+    return html(renderLogin({
+        hasPassword: hasConfiguredEditorPassword(),
+        devActive: isDevEditorPasswordActive(),
+        missingSettings: missingProductionSettings(),
+        apiBasePath: runtime.apiBasePath,
+        redirectTo: redirectTarget,
+        editorHome: runtime.editorHome,
+        brandName: runtime.brand.name,
+        brandLogo: runtime.brand.logo,
+        faviconUrl: runtime.brand.faviconUrl,
+        themeCssHref: `${runtime.apiBasePath}/theme.css`,
+        studioCssHref: "/__caret/studio.css",
+        loginCssHref: "/__caret/studio-login.css",
+        // Render the error banner server-side for the no-JS path: a failed native
+        // form login redirects here with ?error=invalid, and without this the JS
+        // handler is the only thing that would ever reveal the banner.
+        showError: context.url.searchParams.get("error") === "invalid",
+        locale: runtime.locale,
+        messages: runtime.messages,
+    }));
+}
+//# sourceMappingURL=admin.js.map

@@ -1,1 +1,2 @@
-dist/
+# dist is committed on purpose: the fork is consumed via github: tarball installs
+# (pnpm does not install devDeps of git-hosted deps, so a build-on-install cannot work)

@@ -1,0 +1,45 @@
+import { canPerform } from "../authorization.js";
+export const prerender = false;
+import { isEditorAuthenticated } from "../auth/session.js";
+import { UPLOAD_MESSAGES, UploadError } from "../storage/image-validation.js";
+import { json, getUploadHandler, getSessionId, enforceCsrfHeader, readFormBody, MAX_UPLOAD_BODY_BYTES, } from "./_helpers.js";
+export async function POST(context) {
+    const csrfFailure = enforceCsrfHeader(context.request);
+    if (csrfFailure)
+        return csrfFailure;
+    if (!isEditorAuthenticated(context)) {
+        return json({ error: "Unauthorized" }, 401);
+    }
+    if (!(await canPerform("upload")))
+        return json({ error: "Permission denied" }, 403);
+    const contentType = context.request.headers.get("content-type") ?? "";
+    if (!contentType.includes("multipart/form-data")) {
+        return json({ error: "Expected multipart/form-data" }, 400);
+    }
+    const parsed = await readFormBody(context.request, MAX_UPLOAD_BODY_BYTES);
+    if (!parsed.ok) {
+        return parsed.response.status === 413 ? json({ error: UPLOAD_MESSAGES.size }, 413) : parsed.response;
+    }
+    const formData = parsed.value;
+    const file = formData.get("file");
+    if (!(file instanceof File)) {
+        return json({ error: "Missing file" }, 400);
+    }
+    try {
+        const handler = getUploadHandler();
+        const sessionId = getSessionId();
+        const result = await handler.upload(file, sessionId ? { sessionId } : undefined);
+        return json({ url: result.url });
+    }
+    catch (error) {
+        // Only surface curated validation/quota messages. Unexpected errors (e.g.
+        // a storage error carrying a filesystem path) are logged and returned
+        // opaquely so they never leak to the client.
+        if (error instanceof UploadError) {
+            return json({ error: error.message }, 400);
+        }
+        console.error("[caretcms] Upload failed:", error);
+        return json({ error: "Upload failed" }, 500);
+    }
+}
+//# sourceMappingURL=upload.js.map

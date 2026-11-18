@@ -1,0 +1,99 @@
+export const prerender = false;
+import { hasConfiguredEditorPassword, isEditorPasswordValid, issueEditorSessionCookies, } from "../auth/session.js";
+import { sanitizeRedirect } from "../auth/cookie-utils.js";
+import { checkLoginRateLimit, clearLoginAttempts, extractRateLimitKey, recordLoginFailure, } from "../auth/rate-limiter.js";
+import { getRuntimeConfig } from "../config.js";
+import { readJsonBody, readFormBody, MAX_JSON_BODY_BYTES } from "./_helpers.js";
+import { getRuntimeServices } from "../providers.js";
+function redirect(pathname, setCookies = []) {
+    const headers = new Headers({ Location: pathname, "Cache-Control": "private, no-store" });
+    for (const cookie of setCookies)
+        headers.append("Set-Cookie", cookie);
+    return new Response(null, { status: 302, headers });
+}
+function json(body, status = 200, extraHeaders, setCookies = []) {
+    const headers = new Headers({
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "private, no-store",
+        ...extraHeaders,
+    });
+    for (const cookie of setCookies)
+        headers.append("Set-Cookie", cookie);
+    return new Response(JSON.stringify(body), { status, headers });
+}
+export async function POST(context) {
+    const runtime = getRuntimeConfig();
+    if ((await getRuntimeServices()).identityAdapter) {
+        return json({ error: "Password login is disabled by the configured identity adapter." }, 409);
+    }
+    if (!hasConfiguredEditorPassword()) {
+        return json({ error: "Editor password is not configured." }, 500);
+    }
+    const rateLimitKey = extractRateLimitKey(context.request);
+    const rateLimit = checkLoginRateLimit(rateLimitKey);
+    if (!rateLimit.allowed) {
+        return json({ error: "Too many login attempts. Please wait and try again." }, 429, { "Retry-After": String(rateLimit.retryAfterSeconds) });
+    }
+    const contentType = context.request.headers.get("content-type") ?? "";
+    const accept = context.request.headers.get("accept") ?? "";
+    const isJsonBody = contentType.includes("application/json");
+    const wantsJsonResponse = isJsonBody || accept.includes("application/json");
+    let password = "";
+    let redirectTo = context.url.searchParams.get("redirect");
+    if (isJsonBody) {
+        const parsed = await readJsonBody(context.request);
+        if (!parsed.ok)
+            return parsed.response;
+        const body = parsed.value;
+        password = typeof body?.password === "string" ? body.password : "";
+        redirectTo =
+            typeof body?.redirect === "string" ? body.redirect : redirectTo;
+    }
+    else {
+        const parsed = await readFormBody(context.request, MAX_JSON_BODY_BYTES);
+        if (!parsed.ok)
+            return parsed.response;
+        const formData = parsed.value;
+        password =
+            typeof formData?.get("password") === "string"
+                ? formData?.get("password")
+                : "";
+        redirectTo =
+            typeof formData?.get("redirect") === "string"
+                ? formData?.get("redirect")
+                : redirectTo;
+    }
+    // Default to the live site (inline editor) when no explicit redirect is given;
+    // `editorHome` (default "/") makes that landing page configurable.
+    const safeRedirect = sanitizeRedirect(redirectTo, runtime.editorHome);
+    // Password check + session minting both derive HMACs from the session
+    // secret, which throws in production when CARET_SESSION_SECRET is unset.
+    // Surface that as a configuration error instead of an unhandled 500.
+    let passwordValid;
+    let cookies;
+    try {
+        passwordValid = isEditorPasswordValid(password);
+        if (!passwordValid) {
+            recordLoginFailure(rateLimitKey);
+            if (wantsJsonResponse)
+                return json({ error: "Invalid password" }, 401);
+            return redirect(`${runtime.mountPath}?error=invalid`);
+        }
+        clearLoginAttempts(rateLimitKey);
+        cookies = issueEditorSessionCookies("/", context.request);
+    }
+    catch (err) {
+        return json({ error: err.message }, 500);
+    }
+    if (wantsJsonResponse) {
+        return json({ ok: true, redirect: safeRedirect }, 200, undefined, cookies);
+    }
+    return redirect(safeRedirect, cookies);
+}
+export async function GET() {
+    return json({
+        error: "Method not allowed",
+        allowedMethods: ["POST"],
+    }, 405);
+}
+//# sourceMappingURL=auth-login.js.map

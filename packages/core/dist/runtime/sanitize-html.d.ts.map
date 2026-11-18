@@ -1,0 +1,1 @@
+{"version":3,"file":"sanitize-html.d.ts","sourceRoot":"","sources":["../../src/runtime/sanitize-html.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAML,KAAK,cAAc,EACpB,MAAM,qBAAqB,CAAC;AAK7B,YAAY,EAAE,cAAc,EAAE,MAAM,qBAAqB,CAAC;AAE1D,MAAM,WAAW,eAAe;IAC9B,cAAc,CAAC,EAAE,cAAc,CAAC;CACjC;AAED,wBAAgB,YAAY,CAAC,IAAI,EAAE,MAAM,EAAE,OAAO,CAAC,EAAE,eAAe,GAAG,MAAM,CAuB5E"}

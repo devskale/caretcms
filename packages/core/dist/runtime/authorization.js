@@ -1,0 +1,33 @@
+import { getRequestContext } from './request-context.js';
+export class PermissionDenied extends Error {
+    constructor() { super('Permission denied'); this.name = 'PermissionDenied'; }
+}
+/** Absent policy preserves legacy authenticated-editor access. HTTP routes
+ * still authenticate first; this helper never grants an anonymous session. */
+export async function canPerform(action, collection, id) {
+    const authorize = getRequestContext()?.authorize;
+    return authorize ? authorize(action, collection, id) : true;
+}
+export async function requirePermission(action, collection, id) {
+    if (!(await canPerform(action, collection, id)))
+        throw new PermissionDenied();
+}
+export async function canMutate(command) {
+    if (command.type === 'create_collection' || command.type === 'delete_collection') {
+        return canPerform('manageCollections', command.id);
+    }
+    if (command.type === 'reorder_entries') {
+        for (const item of command.items)
+            if (!(await canPerform('edit', command.collection, item.id)))
+                return false;
+        return true;
+    }
+    if (!(await canPerform('edit', command.collection, command.id)))
+        return false;
+    // Making a new entry (the Studio's Create) is its own permission; a first
+    // save to content a page already shows is an edit.
+    if (command.type === 'put_entry' && command.createOnly === true)
+        return canPerform('create', command.collection, command.id);
+    return command.type !== 'delete_entry' || canPerform('delete', command.collection, command.id);
+}
+//# sourceMappingURL=authorization.js.map

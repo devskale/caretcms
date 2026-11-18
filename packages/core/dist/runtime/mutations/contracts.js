@@ -1,0 +1,459 @@
+import { PRIVATE_ENTRY_KEYS } from "../draft-state.js";
+import { COLLECTION_NAME_RE, ENTRY_ID_RE } from "../storage/id-contracts.js";
+import { BLOCK_PATH_RE, BODY_OVERLAY_KEY, parseMdSrc, } from "../../markdown/contracts.js";
+/**
+ * Upper bound on an `md_block` HTML payload (UTF-16 code units). A block is a
+ * single paragraph/heading/list item; even generous prose stays far below this.
+ * A dedicated cap (vs the blanket 1MB JSON body cap) keeps one block edit from
+ * dragging megabytes into the draft overlay and every subsequent publish.
+ */
+export const MAX_MD_BLOCK_HTML_LENGTH = 64 * 1024;
+export function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function asNonEmptyString(value) {
+    if (typeof value !== "string")
+        return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+function asOptionalExpectedRevision(value) {
+    if (value === undefined)
+        return undefined;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0)
+        return value;
+    return null;
+}
+/**
+ * Validate a collection name's *format* (not its existence). A well-formed
+ * name is accepted even for a collection that has never been written — writes
+ * auto-create collections (FR-8), and reads of a not-yet-created collection
+ * are legitimate (the template is the source of truth until the first edit).
+ */
+export function parseCollectionName(value) {
+    if (typeof value !== "string")
+        return null;
+    const normalized = value.trim().toLowerCase();
+    return COLLECTION_NAME_RE.test(normalized) ? normalized : null;
+}
+function parseCollection(_adapter, value) {
+    return parseCollectionName(value);
+}
+/**
+ * Validate an entry id as a filesystem-safe slug. Blocks `..`, `/`, `\`,
+ * leading `.`, and any character outside `[a-z0-9_-]`. Critical: prevents
+ * path traversal in adapters that use the id as a filename.
+ */
+export function parseEntryId(value) {
+    if (typeof value !== "string")
+        return null;
+    const normalized = value.trim().toLowerCase();
+    return ENTRY_ID_RE.test(normalized) ? normalized : null;
+}
+function issue(path, code, message) {
+    return { path, code, message };
+}
+async function parseSaveFieldCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection);
+    const id = parseEntryId(input.id);
+    const field = asNonEmptyString(input.field);
+    const value = input.value;
+    const expectedRevision = asOptionalExpectedRevision(input.expectedRevision);
+    if (!collection)
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    if (!id)
+        issues.push(issue("id", "invalid_type", "Invalid id"));
+    if (!field)
+        issues.push(issue("field", "invalid_type", "Invalid field path"));
+    if (typeof value !== "string")
+        issues.push(issue("value", "invalid_type", "Value must be a string"));
+    if (expectedRevision === null) {
+        issues.push(issue("expectedRevision", "invalid_type", "expectedRevision must be a non-negative integer"));
+    }
+    // The body-draft map is written ONLY by md_block (whose markdown is derived
+    // server-side). A save_field into it would smuggle unvalidated markdown that
+    // publish later splices into a source file.
+    if (field && PRIVATE_ENTRY_KEYS.some(key => field === key || field.startsWith(`${key}.`))) {
+        issues.push(issue("field", "reserved_field", "Private CMS fields are reserved"));
+    }
+    if (issues.length > 0 || !collection || !id || !field || typeof value !== "string") {
+        return { ok: false, issues };
+    }
+    return {
+        ok: true,
+        command: {
+            type: "save_field",
+            collection,
+            id,
+            field,
+            value,
+            expectedRevision: expectedRevision ?? undefined,
+        },
+    };
+}
+async function parsePutEntryCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection);
+    const id = parseEntryId(input.id);
+    const data = input.data;
+    const expectedRevision = asOptionalExpectedRevision(input.expectedRevision);
+    if (!collection)
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    if (!id)
+        issues.push(issue("id", "invalid_type", "Invalid id"));
+    if (!isRecord(data))
+        issues.push(issue("data", "invalid_type", "data must be an object"));
+    if (expectedRevision === null) {
+        issues.push(issue("expectedRevision", "invalid_type", "expectedRevision must be a non-negative integer"));
+    }
+    if (input.createOnly !== undefined && typeof input.createOnly !== "boolean") {
+        issues.push(issue("createOnly", "invalid_type", "createOnly must be a boolean"));
+    }
+    // See parseSaveFieldCommand: only md_block may write the body-draft map.
+    if (isRecord(data) && PRIVATE_ENTRY_KEYS.some(key => Object.hasOwn(data, key))) {
+        issues.push(issue(`data.${BODY_OVERLAY_KEY}`, "reserved_field", "Private CMS fields are reserved"));
+    }
+    if (issues.length > 0 || !collection || !id || !isRecord(data))
+        return { ok: false, issues };
+    return {
+        ok: true,
+        command: {
+            type: "put_entry",
+            collection,
+            id,
+            data,
+            ...(input.createOnly === true ? { createOnly: true } : {}),
+            expectedRevision: expectedRevision ?? undefined,
+        },
+    };
+}
+async function parseDeleteEntryCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection);
+    const id = parseEntryId(input.id);
+    const expectedRevision = asOptionalExpectedRevision(input.expectedRevision);
+    if (!collection)
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    if (!id)
+        issues.push(issue("id", "invalid_type", "Invalid id"));
+    if (expectedRevision === null) {
+        issues.push(issue("expectedRevision", "invalid_type", "expectedRevision must be a non-negative integer"));
+    }
+    if (issues.length > 0 || !collection || !id)
+        return { ok: false, issues };
+    return {
+        ok: true,
+        command: {
+            type: "delete_entry",
+            collection,
+            id,
+            expectedRevision: expectedRevision ?? undefined,
+        },
+    };
+}
+async function parseReorderEntriesCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection);
+    if (!collection) {
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    }
+    const rawItems = input.items;
+    if (!Array.isArray(rawItems) || rawItems.length === 0) {
+        issues.push(issue("items", "invalid_type", "Items must be a non-empty array"));
+        return { ok: false, issues };
+    }
+    const items = [];
+    const seenIds = new Set();
+    rawItems.forEach((item, index) => {
+        if (!isRecord(item)) {
+            issues.push(issue(`items.${index}`, "invalid_type", "Item must be an object"));
+            return;
+        }
+        const id = parseEntryId(item.id);
+        const order = item.order;
+        const expectedRevision = asOptionalExpectedRevision(item.expectedRevision);
+        if (!id)
+            issues.push(issue(`items.${index}.id`, "invalid_type", "Invalid id"));
+        else if (seenIds.has(id)) {
+            issues.push(issue(`items.${index}.id`, "duplicate", "Entry ids must be unique"));
+        }
+        else {
+            seenIds.add(id);
+        }
+        if (!(typeof order === "number" && Number.isInteger(order) && order >= 0)) {
+            issues.push(issue(`items.${index}.order`, "invalid_type", "order must be a non-negative integer"));
+        }
+        if (expectedRevision === null) {
+            issues.push(issue(`items.${index}.expectedRevision`, "invalid_type", "expectedRevision must be a non-negative integer"));
+        }
+        if (id && typeof order === "number" && Number.isInteger(order) && order >= 0) {
+            items.push({
+                id,
+                order,
+                expectedRevision: expectedRevision ?? undefined,
+            });
+        }
+    });
+    if (issues.length > 0 || !collection)
+        return { ok: false, issues };
+    return { ok: true, command: { type: "reorder_entries", collection, items } };
+}
+async function parseUpdatePageLayoutCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection ?? "pages");
+    const id = parseEntryId(input.id);
+    const expectedRevision = asOptionalExpectedRevision(input.expectedRevision);
+    const rawSections = input.sections;
+    if (!collection)
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    if (!id)
+        issues.push(issue("id", "invalid_type", "Invalid id"));
+    if (expectedRevision === null) {
+        issues.push(issue("expectedRevision", "invalid_type", "expectedRevision must be a non-negative integer"));
+    }
+    if (!Array.isArray(rawSections) || rawSections.length === 0) {
+        issues.push(issue("sections", "invalid_type", "Sections must be a non-empty array"));
+        return { ok: false, issues };
+    }
+    const sections = [];
+    rawSections.forEach((section, index) => {
+        if (!isRecord(section)) {
+            issues.push(issue(`sections.${index}`, "invalid_type", "Section must be an object"));
+            return;
+        }
+        const sectionId = asNonEmptyString(section.id);
+        const key = asNonEmptyString(section.key);
+        const enabled = section.enabled;
+        const spacing = section.spacing_y;
+        if (!sectionId)
+            issues.push(issue(`sections.${index}.id`, "invalid_type", "Invalid section id"));
+        if (!key)
+            issues.push(issue(`sections.${index}.key`, "invalid_type", "Invalid section key"));
+        if (!(enabled === undefined || typeof enabled === "boolean")) {
+            issues.push(issue(`sections.${index}.enabled`, "invalid_type", "enabled must be boolean"));
+        }
+        if (!(spacing === undefined || typeof spacing === "string")) {
+            issues.push(issue(`sections.${index}.spacing_y`, "invalid_type", "spacing_y must be a string"));
+        }
+        if (sectionId && key) {
+            sections.push({
+                id: sectionId,
+                key,
+                enabled: typeof enabled === "boolean" ? enabled : true,
+                spacing_y: typeof spacing === "string" ? spacing : undefined,
+            });
+        }
+    });
+    if (issues.length > 0 || !id || !collection)
+        return { ok: false, issues };
+    return {
+        ok: true,
+        command: {
+            type: "update_page_layout",
+            collection,
+            id,
+            sections,
+            expectedRevision: expectedRevision ?? undefined,
+        },
+    };
+}
+async function parseMdBlockCommand(adapter, input) {
+    const issues = [];
+    const collection = await parseCollection(adapter, input.collection);
+    const id = parseEntryId(input.id);
+    const blockPath = typeof input.blockPath === "string" ? input.blockPath : null;
+    const src = typeof input.src === "string" ? parseMdSrc(input.src) : null;
+    const html = input.html;
+    const expectedRevision = asOptionalExpectedRevision(input.expectedRevision);
+    if (!collection)
+        issues.push(issue("collection", "invalid_type", "Invalid collection"));
+    if (!id)
+        issues.push(issue("id", "invalid_type", "Invalid id"));
+    if (!blockPath || !BLOCK_PATH_RE.test(blockPath)) {
+        issues.push(issue("blockPath", "invalid_type", "Invalid block path"));
+    }
+    if (!src)
+        issues.push(issue("src", "invalid_type", "Invalid source hint"));
+    if (typeof html !== "string") {
+        issues.push(issue("html", "invalid_type", "html must be a string"));
+    }
+    else if (html.length > MAX_MD_BLOCK_HTML_LENGTH) {
+        issues.push(issue("html", "too_long", `html exceeds ${MAX_MD_BLOCK_HTML_LENGTH} characters`));
+    }
+    let sources;
+    let paragraphs;
+    if (input.sources !== undefined || input.paragraphs !== undefined) {
+        if (!Array.isArray(input.sources) || input.sources.length < 1 || input.sources.length > 128 ||
+            !Array.isArray(input.paragraphs) || input.paragraphs.length > 128 ||
+            !input.paragraphs.every(p => typeof p === "string")) {
+            issues.push(issue("paragraphs", "invalid_type", "Expected at most 128 paragraphs and 1–128 sources"));
+        }
+        else {
+            sources = [];
+            paragraphs = input.paragraphs;
+            for (const source of input.sources) {
+                const hint = isRecord(source) && typeof source.src === "string" ? parseMdSrc(source.src) : null;
+                if (!isRecord(source) || typeof source.blockPath !== "string" || !/^\d+$/.test(source.blockPath) ||
+                    !hint || typeof source.html !== "string") {
+                    issues.push(issue("sources", "invalid_type", "Invalid paragraph source"));
+                }
+                else
+                    sources.push({ blockPath: source.blockPath, src: hint, html: source.html });
+            }
+            const size = paragraphs.reduce((n, p) => n + p.length, 0) + sources.reduce((n, p) => n + p.html.length, 0);
+            if (size > MAX_MD_BLOCK_HTML_LENGTH)
+                issues.push(issue("paragraphs", "too_long", "Paragraph group exceeds 65536 characters"));
+            if (sources[0]?.blockPath !== blockPath || JSON.stringify(sources[0]?.src) !== JSON.stringify(src)) {
+                issues.push(issue("sources", "invalid_type", "Group must start at its bound source"));
+            }
+        }
+    }
+    if (expectedRevision === null) {
+        issues.push(issue("expectedRevision", "invalid_type", "expectedRevision must be a non-negative integer"));
+    }
+    if (issues.length > 0 ||
+        !collection ||
+        !id ||
+        !blockPath ||
+        !src ||
+        typeof html !== "string") {
+        return { ok: false, issues };
+    }
+    return {
+        ok: true,
+        command: {
+            type: "md_block",
+            collection,
+            id,
+            blockPath,
+            src,
+            html,
+            ...(sources && paragraphs ? { sources, paragraphs } : {}),
+            expectedRevision: expectedRevision ?? undefined,
+        },
+    };
+}
+async function parseMutationPayload(adapter, input) {
+    if (!isRecord(input)) {
+        return {
+            ok: false,
+            issues: [issue("", "invalid_type", "Mutation payload must be an object")],
+        };
+    }
+    const type = asNonEmptyString(input.type);
+    if (!type) {
+        return {
+            ok: false,
+            issues: [issue("type", "invalid_type", "Missing mutation type")],
+        };
+    }
+    switch (type) {
+        case "save_field":
+            return parseSaveFieldCommand(adapter, input);
+        case "put_entry":
+            return parsePutEntryCommand(adapter, input);
+        case "delete_entry":
+            return parseDeleteEntryCommand(adapter, input);
+        case "reorder_entries":
+            return parseReorderEntriesCommand(adapter, input);
+        case "update_page_layout":
+            return parseUpdatePageLayoutCommand(adapter, input);
+        case "create_collection":
+            return parseCreateCollectionCommand(adapter, input);
+        case "delete_collection":
+            return parseDeleteCollectionCommand(adapter, input);
+        case "md_block":
+            return parseMdBlockCommand(adapter, input);
+        default:
+            return {
+                ok: false,
+                issues: [issue("type", "invalid_enum_value", `Unsupported mutation type "${type}"`)],
+            };
+    }
+}
+async function parseCreateCollectionCommand(_adapter, input) {
+    const issues = [];
+    // Same normalization as every other command (save_field/put_entry/
+    // delete_collection all lowercase via parseCollectionName): without it,
+    // create_collection("Blog") was rejected while save_field on "Blog" silently
+    // wrote to "blog".
+    const id = parseCollectionName(input.id);
+    const label = asNonEmptyString(input.label);
+    const description = typeof input.description === "string" ? input.description : undefined;
+    const icon = typeof input.icon === "string" ? input.icon : undefined;
+    const creatable = typeof input.creatable === "boolean" ? input.creatable : undefined;
+    const orderable = typeof input.orderable === "boolean" ? input.orderable : undefined;
+    const deletable = typeof input.deletable === "boolean" ? input.deletable : undefined;
+    const singletonId = input.singletonId === undefined ? undefined : parseEntryId(input.singletonId);
+    const order = typeof input.order === "number" && Number.isFinite(input.order) ? input.order : undefined;
+    const schema = input.schema;
+    if (!id) {
+        issues.push(issue("id", "invalid_type", "Collection ID must be lowercase alphanumeric with hyphens/underscores"));
+    }
+    if (!label) {
+        issues.push(issue("label", "invalid_type", "Label is required"));
+    }
+    if (!isRecord(schema) || schema.type !== "object" || !isRecord(schema.properties)) {
+        issues.push(issue("schema", "invalid_type", "Schema must be a valid JSON Schema object with properties"));
+    }
+    if (input.singletonId !== undefined && !singletonId) {
+        issues.push(issue("singletonId", "invalid_type", "singletonId must be a valid entry id"));
+    }
+    if (issues.length > 0 || !id || !label || !isRecord(schema)) {
+        return { ok: false, issues };
+    }
+    return {
+        ok: true,
+        command: {
+            type: "create_collection",
+            id,
+            label,
+            description,
+            icon,
+            creatable,
+            orderable,
+            deletable,
+            singletonId: singletonId ?? undefined,
+            order,
+            schema: schema,
+        },
+    };
+}
+async function parseDeleteCollectionCommand(adapter, input) {
+    const issues = [];
+    const id = await parseCollection(adapter, input.id);
+    if (!id) {
+        issues.push(issue("id", "invalid_type", "Collection ID must be lowercase alphanumeric with hyphens/underscores"));
+    }
+    if (issues.length > 0 || !id) {
+        return { ok: false, issues };
+    }
+    return {
+        ok: true,
+        command: {
+            type: "delete_collection",
+            id,
+        },
+    };
+}
+/** Parse the optional second version without changing the legacy revision grammar. */
+export async function parseMutationCommand(adapter, input) {
+    const parsed = await parseMutationPayload(adapter, input);
+    if (!parsed.ok || !isRecord(input))
+        return parsed;
+    const targets = parsed.command.type === "reorder_entries"
+        ? parsed.command.items.map((item, index) => ({ command: item, input: input.items[index], path: `items.${index}.expectedBaseRevision` }))
+        : "collection" in parsed.command ? [{ command: parsed.command, input, path: "expectedBaseRevision" }] : [];
+    for (const target of targets) {
+        const value = target.input.expectedBaseRevision;
+        if (value === undefined)
+            continue;
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+            return { ok: false, issues: [issue(target.path, "invalid_type", "expectedBaseRevision must be a non-negative safe integer")] };
+        }
+        target.command.expectedBaseRevision = value;
+    }
+    return parsed;
+}
+//# sourceMappingURL=contracts.js.map

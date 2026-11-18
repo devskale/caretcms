@@ -1,0 +1,1 @@
+{"version":3,"file":"id-contracts.d.ts","sourceRoot":"","sources":["../../../src/runtime/storage/id-contracts.ts"],"names":[],"mappings":"AAAA;;;;;;;GAOG;AAEH,yBAAyB;AACzB,eAAO,MAAM,kBAAkB,QAAuB,CAAC;AAEvD,mBAAmB;AACnB,eAAO,MAAM,WAAW,QAA0B,CAAC;AAEnD;;;;;GAKG;AACH,eAAO,MAAM,YAAY,QAA0B,CAAC;AAEpD,oFAAoF;AACpF,wBAAgB,kBAAkB,CAAC,QAAQ,EAAE,MAAM,GAAG,MAAM,CAK3D"}

@@ -1,0 +1,52 @@
+import { rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { recordSelfWrite } from "../self-writes.js";
+/**
+ * Crash-safe filesystem write primitives shared by every filesystem-backed
+ * StorageAdapter and the sidecar metadata store.
+ */
+/**
+ * Write a file atomically: stream into a sibling temp file, then rename over
+ * the target. rename(2) is atomic on the same filesystem, so a crash/SIGKILL
+ * mid-write can never leave a truncated or empty file — readers always see
+ * either the old contents or the complete new contents. The temp file is a
+ * sibling (same dir → same filesystem) so the rename stays atomic and never
+ * crosses a device boundary.
+ */
+export async function atomicWrite(filePath, contents) {
+    const tmpPath = `${filePath}.${randomUUID()}.tmp`;
+    recordSelfWrite(tmpPath);
+    recordSelfWrite(filePath);
+    await writeFile(tmpPath, contents, "utf8");
+    try {
+        await rename(tmpPath, filePath);
+    }
+    catch (error) {
+        await unlink(tmpPath).catch(() => { });
+        throw error;
+    }
+}
+const writeChains = new Map();
+/**
+ * Serialize async tasks that share a `key` so their read-modify-write sequences
+ * never interleave. Used for the single shared revisions store, where a torn
+ * read-increment-write would lose revision state and defeat optimistic
+ * concurrency. Keyed by an arbitrary string (typically a file path); chains are
+ * cleaned up once drained so the map can't grow unbounded.
+ */
+export function serializeWrite(key, task) {
+    const previous = writeChains.get(key) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    // The stored promise must never reject: an unhandled rejection there (when
+    // `task` throws on a full/read-only disk) crashes the process. Chain the queue
+    // on a settled gate that swallows the rejection; the caller still sees `next`.
+    const gate = next.then(() => { }, () => { });
+    const stored = gate.then(() => {
+        if (writeChains.get(key) === stored) {
+            writeChains.delete(key);
+        }
+    });
+    writeChains.set(key, stored);
+    return next;
+}
+//# sourceMappingURL=atomic-write.js.map

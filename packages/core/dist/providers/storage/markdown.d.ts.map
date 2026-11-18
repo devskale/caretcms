@@ -1,0 +1,1 @@
+{"version":3,"file":"markdown.d.ts","sourceRoot":"","sources":["../../../src/providers/storage/markdown.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,eAAe,EAAE,MAAM,2CAA2C,CAAC;AAE5E,wBAAgB,uBAAuB,CAAC,OAAO,CAAC,EAAE;IAChD,WAAW,CAAC,EAAE,MAAM,CAAC;IACrB,QAAQ,CAAC,EAAE,MAAM,CAAC;IAClB,uFAAuF;IACvF,WAAW,CAAC,EAAE,MAAM,CAAC;CACtB,GAAG,eAAe,CAElB;AAED,eAAe,uBAAuB,CAAC"}

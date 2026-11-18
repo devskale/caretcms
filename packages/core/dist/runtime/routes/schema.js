@@ -1,0 +1,77 @@
+export const prerender = false;
+import { isEditorAuthenticated } from "../auth/session.js";
+import { getRegisteredSchema, isKnownStudioCollection, resolveCollectionStudioConfig, } from "../schema-registry.js";
+import { inferJsonSchema, buildTemplate } from "../../schema-utils.js";
+import { stripBodyOverlay } from "../utils.js";
+import { json, resolveReadAdapter } from "./_helpers.js";
+export async function GET(context) {
+    if (!isEditorAuthenticated(context)) {
+        return json({ error: "Unauthorized" }, 401);
+    }
+    const adapter = await resolveReadAdapter();
+    const collectionRaw = (context.url.searchParams.get("collection") ?? "")
+        .trim()
+        .toLowerCase();
+    if (!(await isKnownStudioCollection(adapter, collectionRaw))) {
+        return json({ error: "Invalid collection" }, 400);
+    }
+    // 1. Check for explicit registered schema (from integration config)
+    const registered = getRegisteredSchema(collectionRaw);
+    if (registered) {
+        const metadata = await resolveCollectionStudioConfig(adapter, collectionRaw);
+        return json({
+            schema: registered.schema,
+            template: registered.template,
+            collection: collectionRaw,
+            source: "explicit",
+            metadata,
+        });
+    }
+    // 2. Check for dynamic schema (from collection metadata)
+    const metadata = await adapter.getCollectionMetadata(collectionRaw);
+    if (metadata?.schema) {
+        // Same builder as the inferred-schema path below: the default new-entry
+        // shape must not depend on HOW a collection came to exist (a second flat
+        // builder used to seed enums/integers/nested objects differently).
+        const template = buildTemplate(metadata.schema) ?? {};
+        return json({
+            schema: metadata.schema,
+            template,
+            collection: collectionRaw,
+            source: "dynamic",
+            metadata: {
+                label: metadata.label,
+                description: metadata.description,
+                icon: metadata.icon,
+                creatable: metadata.creatable,
+                orderable: metadata.orderable,
+                deletable: metadata.deletable,
+                singletonId: metadata.singletonId,
+                order: metadata.order,
+                previewPath: metadata.previewPath,
+                publication: metadata.publication,
+            },
+        });
+    }
+    // 3. Fall back to inference. Entries in a schemaless collection can have
+    // different shapes, so an existing entry's form is inferred from that entry;
+    // a form built from another entry would omit its fields and overwrite them.
+    const id = (context.url.searchParams.get("id") ?? "").trim();
+    const source = id
+        ? await adapter.getEntry(collectionRaw, id)
+        : (await adapter.listEntries(collectionRaw))[0];
+    // Strip the reserved body-draft map so a drafted entry can't leak a __body
+    // field into the inferred schema (and thus the Studio form).
+    const schema = inferJsonSchema(stripBodyOverlay(source?.data ?? {}));
+    const template = buildTemplate(schema);
+    const inferredMetadata = await resolveCollectionStudioConfig(adapter, collectionRaw);
+    return json({
+        schema,
+        template,
+        collection: collectionRaw,
+        source: "inferred",
+        inferredFrom: source?.id ?? null,
+        metadata: inferredMetadata,
+    });
+}
+//# sourceMappingURL=schema.js.map

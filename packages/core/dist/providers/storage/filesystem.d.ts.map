@@ -1,0 +1,1 @@
+{"version":3,"file":"filesystem.d.ts","sourceRoot":"","sources":["../../../src/providers/storage/filesystem.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,iBAAiB,EAAE,MAAM,6CAA6C,CAAC;AAEhF,wBAAgB,yBAAyB,CAAC,OAAO,CAAC,EAAE;IAClD,QAAQ,CAAC,EAAE,MAAM,CAAC;IAClB,QAAQ,CAAC,EAAE,MAAM,CAAC;CACnB,GAAG,iBAAiB,CAEpB;AAED,eAAe,yBAAyB,CAAC"}

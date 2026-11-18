@@ -1,0 +1,68 @@
+import { durableGitJournalEnabled, hasGitJournalQueue, canRetryPublicationJournals } from "../publication-journal.js";
+import { getRequestContext } from "../request-context.js";
+import { canPublishOverlay } from "../publish.js";
+export const prerender = false;
+import { isEditorAuthenticated, getEditorId } from "../auth/session.js";
+import { getRuntimeServices } from "../providers.js";
+import { discardOverlay } from "../publish.js";
+import { countPendingDrafts } from "../unpublished.js";
+import { json, enforceCsrfHeader } from "./_helpers.js";
+/**
+ * GET /api/cms/draft — report whether the current editor has unpublished drafts.
+ */
+export async function GET(context) {
+    if (!isEditorAuthenticated(context))
+        return json({ error: "Unauthorized" }, 401);
+    const editorId = getEditorId(context);
+    if (!editorId)
+        return json({ hasDrafts: false, count: 0 });
+    const { adapter: base } = await getRuntimeServices();
+    if (!base.makeEditorOverlay)
+        return json({ hasDrafts: false, count: 0 });
+    const overlay = await base.makeEditorOverlay(editorId);
+    // Drafts that change nothing visitors see (an undone edit) aren't counted.
+    const count = await countPendingDrafts(base, overlay);
+    const journalPending = durableGitJournalEnabled() && hasGitJournalQueue(overlay)
+        ? (await overlay.listGitJournalReceipts()).length : 0;
+    const retryJournal = journalPending > 0 && await canRetryPublicationJournals(overlay);
+    return json({ ...(journalPending > 0 ? { retryJournal, journalPending } : {}), ...(getRequestContext()?.authorize ? { canPublish: await canPublishOverlay(overlay) } : {}), hasDrafts: count > 0, count, retryRebuild: Boolean(await overlay.getRebuildReceipt?.()) });
+}
+/**
+ * DELETE /api/cms/draft — discard the current editor's draft(s) without
+ * publishing. Optional `?collection=&id=` query scopes it to one entry or
+ * collection; absent, the editor's whole draft is dropped.
+ */
+export async function DELETE(context) {
+    const csrf = enforceCsrfHeader(context.request);
+    if (csrf)
+        return csrf;
+    if (!isEditorAuthenticated(context))
+        return json({ error: "Unauthorized" }, 401);
+    const editorId = getEditorId(context);
+    if (!editorId)
+        return json({ error: "No editor draft session" }, 400);
+    const url = new URL(context.request.url);
+    const scope = {};
+    const collection = url.searchParams.get("collection");
+    const id = url.searchParams.get("id");
+    if (collection)
+        scope.collection = collection;
+    if (id)
+        scope.id = id;
+    if (scope.id && !scope.collection) {
+        return json({ error: "id requires a collection" }, 400);
+    }
+    const { adapter: base } = await getRuntimeServices();
+    if (!base.makeEditorOverlay) {
+        return json({ error: "Drafts are not supported by the configured storage adapter" }, 400);
+    }
+    const overlay = await base.makeEditorOverlay(editorId);
+    try {
+        const cleared = await discardOverlay(overlay, scope);
+        return json({ ok: true, cleared });
+    }
+    catch {
+        return json({ error: "Some drafts require publish recovery. Retry Publish before discarding them." }, 409);
+    }
+}
+//# sourceMappingURL=draft.js.map

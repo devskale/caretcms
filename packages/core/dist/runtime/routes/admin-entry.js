@@ -1,0 +1,370 @@
+import { canPerform } from "../authorization.js";
+import { isPageCollection, loadPageContent } from "../page-content.js";
+export const prerender = false;
+import { isEditorAuthenticated } from "../auth/session.js";
+import { getRuntimeConfig } from "../config.js";
+import { resolveReadAdapter } from "./_helpers.js";
+import { getRegisteredSchema, isKnownStudioCollection, resolveCollectionStudioConfig, } from "../schema-registry.js";
+import { getRequestContext } from "../request-context.js";
+import { publicationField, resolvePreviewPath } from "../collection-policy.js";
+import { escapeHtml, htmlResponse, humanizeCollection, redirectResponse, placeStudio, renderStudioPage, } from "../views/studio-layout.js";
+import { studioNavigation } from "../views/studio-navigation.js";
+import { entryDisplayTitle, humanizeEntryId } from "../entry-title.js";
+export async function GET(context) {
+    const runtime = getRuntimeConfig();
+    const collection = (context.params.collection ?? "").toString();
+    const id = (context.params.id ?? "").toString();
+    const loginRedirect = `${runtime.mountPath}?redirect=${encodeURIComponent(context.url.pathname)}`;
+    if (!isEditorAuthenticated(context)) {
+        return redirectResponse(loginRedirect);
+    }
+    if (!collection || !id) {
+        return redirectResponse(`${runtime.mountPath}/cms`);
+    }
+    const adapter = await resolveReadAdapter();
+    if (!(await isKnownStudioCollection(adapter, collection))) {
+        return redirectResponse(`${runtime.mountPath}/cms`);
+    }
+    const collectionConfig = await resolveCollectionStudioConfig(adapter, collection);
+    if (collectionConfig.singletonId && id !== collectionConfig.singletonId) {
+        return redirectResponse(`${runtime.mountPath}/cms/${encodeURIComponent(collection)}/${encodeURIComponent(collectionConfig.singletonId)}`);
+    }
+    const label = collectionConfig.label || humanizeCollection(collection);
+    const navigation = await studioNavigation(runtime, adapter, collection);
+    const editable = await canPerform("edit", collection, id);
+    const pageCollection = isPageCollection(await loadPageContent(), collection, Boolean(getRegisteredSchema(collection)));
+    const deletable = editable && (collectionConfig.deletable ?? !pageCollection) && !collectionConfig.singletonId && await canPerform("delete", collection, id);
+    const canRestore = editable && await canPerform("publish", collection, id);
+    const savingToPreview = getRequestContext()?.overlayActive === true;
+    const previewPath = resolvePreviewPath(collectionConfig, id);
+    // Opened in a tab of its own, the entry opens over the page that shows it.
+    const sitePath = previewPath ?? runtime.editorHome;
+    const placement = await placeStudio(context, runtime, sitePath);
+    if ("redirect" in placement)
+        return placement.redirect;
+    // More actions only when there is something to do in it.
+    const hasMoreActions = Boolean(previewPath) || (savingToPreview && editable) || deletable;
+    const publicationFieldName = publicationField(collectionConfig);
+    const messages = runtime.messages;
+    const isNew = context.url.searchParams.get("new") === "1";
+    // Named as on every other screen; the page keeps it current as fields change.
+    const stored = isNew ? null : await adapter.getEntry(collection, id).catch(() => null);
+    // A new entry is called what the editor typed in the create dialog.
+    const givenTitle = isNew ? context.url.searchParams.get("title")?.trim() : "";
+    const entryTitle = givenTitle || entryDisplayTitle(collection, id, stored?.data, collectionConfig);
+    const config = {
+        apiBasePath: runtime.apiBasePath,
+        mountPath: runtime.mountPath,
+        collection,
+        id,
+        isNew,
+        initializeIfMissing: collectionConfig.singletonId === id,
+        deletable,
+        editable,
+        saveTarget: savingToPreview ? "preview" : "live",
+        previewPath,
+        titleField: collectionConfig.titleField ?? null,
+        fallbackTitle: collectionConfig.singletonId ? label : humanizeEntryId(id),
+        publicationField: publicationFieldName,
+        messages,
+    };
+    const extraStyles = `@import "/__caret/admin-entry.css";
+    .editor-action-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      position: sticky;
+      top: calc(var(--studio-main-pad-top, 0px) * -1);
+      z-index: 8;
+      padding: calc(var(--studio-main-pad-top, 0px) + 0.25rem) 0 1rem;
+      margin: calc(var(--studio-main-pad-top, 0px) * -1) 0 1.25rem;
+      border-bottom: 1px solid var(--studio-border);
+      background: var(--studio-bg);
+    }
+    .editor-heading { min-width: 0; }
+    .editor-action-bar h1 {
+      font-family: var(--studio-font-heading);
+      font-size: clamp(1.25rem, 2.4vw, 1.5rem);
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      margin: 0;
+      color: var(--studio-text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #status-msg {
+      display: inline-block;
+      min-height: 1.25rem;
+      margin-top: 0.2rem;
+      font-size: 0.78rem;
+    }
+    .entry-visibility {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.5rem;
+      padding-left: 0.65rem;
+      border-left: 1px solid var(--studio-border);
+      color: var(--studio-text-muted);
+      font-size: 0.72rem;
+    }
+    .entry-visibility[data-visible="true"] { color: var(--studio-green); }
+    .editor-context {
+      display: grid;
+      gap: 0.25rem;
+      padding: 0.25rem 0.5rem 0.65rem;
+      border-bottom: 1px solid var(--studio-border);
+      margin-bottom: 0.35rem;
+      font-size: 0.75rem;
+      color: var(--studio-text-dim);
+    }
+    .editor-context .meta {
+      margin: 0;
+      font-family: var(--studio-font-mono);
+      overflow-wrap: anywhere;
+    }
+    .editor-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      justify-content: flex-end;
+      flex-shrink: 0;
+    }
+    #btn-save {
+      min-width: 6.75rem;
+      min-height: 2.375rem;
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: var(--radius-theme-sm);
+      font-family: var(--studio-font);
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    #btn-save.studio-save-dirty {
+      box-shadow: 0 8px 24px var(--studio-accent-soft);
+    }
+    .editor-more { position: relative; }
+    .editor-more > summary {
+      list-style: none;
+      white-space: nowrap;
+    }
+    .editor-more > summary::-webkit-details-marker { display: none; }
+    .editor-more[open] > summary {
+      color: var(--studio-text);
+      border-color: var(--studio-border-hover);
+      background: var(--color-theme-surface-muted);
+    }
+    .editor-more-menu {
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      right: 0;
+      display: grid;
+      gap: 0.25rem;
+      width: min(16rem, calc(100vw - 2rem));
+      padding: 0.35rem;
+      border: 1px solid var(--studio-border-hover);
+      border-radius: var(--radius-theme-sm);
+      background: var(--studio-surface);
+      box-shadow: var(--studio-shadow);
+    }
+    .editor-more-menu > a,
+    .editor-more-menu > button {
+      width: 100%;
+      justify-content: flex-start;
+      border-color: transparent;
+      background: transparent;
+      color: var(--studio-text);
+      text-align: left;
+    }
+    .editor-more-menu > a:hover,
+    .editor-more-menu > button:hover {
+      border-color: transparent;
+      background: var(--studio-overlay);
+      color: var(--studio-text);
+    }
+    .editor-more-menu > .studio-btn-danger {
+      margin-top: 0.25rem;
+      border-top: 1px solid var(--studio-border);
+      border-radius: 0 0 var(--radius-theme-xs) var(--radius-theme-xs);
+      color: var(--studio-red);
+    }
+    .editor-more-menu > .studio-btn-danger:hover {
+      border-top-color: var(--studio-border);
+      background: var(--studio-red-soft);
+      color: var(--studio-red);
+    }
+    .editor-help {
+      margin-bottom: 0.75rem;
+      color: var(--studio-text-muted);
+      font-size: 0.8rem;
+    }
+    .editor-help summary {
+      width: fit-content;
+      padding: 0.35rem 0;
+      color: var(--studio-text-muted);
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .editor-help p {
+      max-width: 42rem;
+      margin: 0.35rem 0 0.75rem;
+      padding-left: 1rem;
+      border-left: 2px solid var(--studio-border-hover);
+      color: var(--studio-text-muted);
+      line-height: 1.6;
+    }
+    @media (max-width: 640px) {
+      .editor-action-bar {
+        flex-wrap: wrap;
+        padding: calc(var(--studio-main-pad-top, 0px) + 0.25rem) 0 0.625rem;
+      }
+      .editor-heading { flex-basis: 100%; }
+      .editor-action-bar h1 {
+        display: -webkit-box;
+        font-size: 1rem;
+        white-space: normal;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+      /* History and More actions stay at the start, where their menu opens
+         rightward; Save (only while changes are pending) sits at the end. */
+      .editor-actions { width: 100%; justify-content: flex-start; }
+      .editor-more-menu {
+        right: auto;
+        left: 0;
+      }
+      #btn-save {
+        min-width: auto;
+        margin-left: auto;
+        padding-inline: 0.75rem;
+      }
+    }
+    .history-panel {
+      margin-bottom: 1.25rem;
+      overflow: hidden;
+      border: 1px solid var(--studio-border);
+      border-radius: var(--radius-theme-md);
+      background: var(--studio-surface);
+    }
+    .history-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--studio-border);
+    }
+    .history-panel-body { padding: 1rem; }
+  `;
+    const body = `<div class="studio-fade-in" style="max-width:52rem;margin:0 auto;" id="cms-entry-page" data-collection="${escapeHtml(collection)}" data-id="${escapeHtml(id)}">
+    <div id="loading" style="display:flex;justify-content:center;padding:5rem 0;">
+      <div class="studio-spinner" style="width:24px;height:24px;"></div>
+    </div>
+
+    <div id="load-error" hidden role="alert" style="text-align:center;padding:5rem 0;">
+      <p id="load-error-message">${escapeHtml(messages["entry.loadFailed"])}</p>
+      <button id="load-error-retry" type="button" class="studio-btn-ghost">${escapeHtml(messages["common.retry"])}</button>
+    </div>
+
+    <div id="not-found" hidden style="text-align:center;padding:5rem 0;color:var(--studio-text-dim);">
+      <p>${escapeHtml(messages["entry.notFound"])}</p>
+      <a href="${escapeHtml(`${runtime.mountPath}/cms/${collection}`)}" style="margin-top:1rem;display:inline-block;font-size:0.75rem;color:var(--studio-accent);text-decoration:underline;">${escapeHtml(messages["entry.goBack"])}</a>
+    </div>
+
+    <div id="editor" hidden>
+      <div class="editor-action-bar">
+        <div class="editor-heading">
+          <h1 id="entry-title">${escapeHtml(entryTitle)}</h1>
+          <span id="status-msg" hidden></span>
+          <button id="btn-undo" type="button" class="studio-btn-ghost entry-undo" hidden>${escapeHtml(messages["entry.undo"])}</button>
+          ${publicationFieldName ? `<span id="visibility-status" class="entry-visibility" aria-live="polite"></span>` : ""}
+        </div>
+        <div class="editor-actions">
+          <button id="btn-history" ${canRestore && !isNew ? "" : "hidden"} data-available="${canRestore}" type="button" class="studio-btn-ghost" aria-controls="history-panel" aria-expanded="false">${escapeHtml(messages["entry.history"])}</button>
+          ${hasMoreActions ? `<details id="entry-more" class="editor-more" ${isNew ? "hidden" : ""}>
+            <summary class="studio-btn-ghost">${escapeHtml(messages["common.more"])}</summary>
+            <div class="editor-more-menu">
+              <div class="editor-context">
+                <p class="meta">${escapeHtml(collection)} / ${escapeHtml(id)}</p>
+                <span id="save-target">${escapeHtml(savingToPreview ? messages["entry.savingPreview"] : messages["entry.savingLive"])}</span>
+              </div>
+              ${previewPath ? `<a id="btn-preview" class="studio-btn-ghost" href="${escapeHtml(previewPath)}" target="_blank" rel="noopener">${escapeHtml(messages["entry.preview"])}</a>` : ""}
+              ${savingToPreview && editable ? `<button id="btn-discard-draft" type="button" class="studio-btn-ghost" hidden>${escapeHtml(messages["entry.discardDraft"])}</button>` : ""}
+              ${deletable ? `<button id="btn-delete" type="button" class="studio-btn-danger">${escapeHtml(messages["entry.delete"])}</button>` : ""}
+            </div>
+          </details>` : ""}
+          ${savingToPreview && editable ? `<button id="btn-publish" type="button" class="studio-btn-primary" hidden>${escapeHtml(messages["entry.publish"])}</button>` : ""}
+          <button id="btn-save" hidden type="button" class="studio-save-clean" disabled>${escapeHtml(messages["entry.saveNow"])}</button>
+        </div>
+      </div>
+
+      <details class="editor-help" id="editor-guide">
+        <summary id="editor-guide-title">${escapeHtml(messages["entry.guideTitle"])}</summary>
+        <p id="editor-guide-copy">${escapeHtml(messages["entry.guideCopy"])}</p>
+      </details>
+
+      ${savingToPreview ? `<details id="draft-changes" class="draft-changes" hidden>
+        <summary id="draft-changes-title"></summary>
+        <ul id="draft-changes-list" class="caret-history-diff"></ul>
+      </details>` : ""}
+
+      ${editable ? "" : `<p id="read-only-note" class="studio-read-only-note" role="note">${escapeHtml(messages["entry.readOnly"])}</p>`}
+
+      <div id="validation-warning" role="alert" hidden style="margin-bottom:1.25rem;padding:1rem;border:1px solid var(--studio-red);border-radius:var(--radius-theme-md);background:var(--studio-red-soft);color:var(--studio-text);font-size:0.85rem;"></div>
+
+      <div id="history-panel" class="history-panel" role="region" aria-labelledby="history-panel-title" hidden>
+        <div class="history-panel-header">
+          <span id="history-panel-title" class="studio-label" style="margin:0;">${escapeHtml(messages["entry.versionHistory"])}</span>
+          <button id="btn-history-close" type="button" class="studio-btn-ghost">${escapeHtml(messages["common.close"])}</button>
+        </div>
+        <div id="history-list" class="history-panel-body">
+          <p style="font-size:0.75rem;color:var(--studio-text-dim);margin:0;">Loading…</p>
+        </div>
+      </div>
+
+      <div id="fields" tabindex="-1"></div>
+    </div>
+  </div>
+
+  <div id="confirm-dialog" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-copy" hidden>
+    <div class="modal-card modal-card-confirm">
+      <h2 id="confirm-dialog-title"></h2>
+      <p id="confirm-dialog-copy"></p>
+      <div style="display:flex;justify-content:flex-end;gap:0.75rem;">
+        <button id="btn-confirm-cancel" type="button" class="studio-btn-ghost">${escapeHtml(messages["common.cancel"])}</button>
+        <button id="btn-confirm-action" type="button" class="studio-btn-primary"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="conflict-dialog" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="conflict-dialog-title" aria-describedby="conflict-dialog-copy" hidden>
+    <div class="modal-card modal-card-confirm">
+      <h2 id="conflict-dialog-title">${escapeHtml(messages["entry.conflictTitle"])}</h2>
+      <p id="conflict-dialog-copy">${escapeHtml(messages["entry.conflictCopy"])}</p>
+      <ul id="conflict-fields" class="conflict-fields"></ul>
+      <div style="display:flex;justify-content:flex-end;gap:0.75rem;flex-wrap:wrap;">
+        <button id="btn-conflict-cancel" type="button" class="studio-btn-ghost">${escapeHtml(messages["common.cancel"])}</button>
+        <button id="btn-conflict-latest" type="button" class="studio-btn-ghost">${escapeHtml(messages["entry.loadLatest"])}</button>
+        <button id="btn-conflict-keep" type="button" class="studio-btn-primary">${escapeHtml(messages["entry.keepMine"])}</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="application/json" id="caret-entry-config">${JSON.stringify(config).replace(/</g, "\\u003c")}</script>
+  <script type="module" src="/__caret/admin-entry.js"></script>`;
+    return htmlResponse(renderStudioPage({
+        runtime,
+        title: `Edit ${entryTitle}`,
+        breadcrumb: [
+            { label, href: `${runtime.mountPath}/cms/${encodeURIComponent(collection)}` },
+            { label: entryTitle },
+        ],
+        navigation,
+        skipLink: { label: messages["entry.skipToForm"], href: "#fields" },
+        body,
+        extraStyles,
+        sitePath,
+        siteError: placement.siteError,
+    }));
+}
+//# sourceMappingURL=admin-entry.js.map

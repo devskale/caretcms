@@ -1,0 +1,143 @@
+/**
+ * editable() — make an inline value editable in place.
+ *
+ * The stega twin of `bindEntry` / `data-caret`: instead of putting the binding
+ * key on an element (which props/loops break), it hides the key INSIDE the value
+ * via stega, so the content stays click-to-edit even when passed through
+ * component props, slots, and `.map()` loops — with no attribute and no live
+ * collection.
+ *
+ * Usage in a `.astro` frontmatter:
+ *
+ *   const features = await editable('pages::home::features.items', [
+ *     { title: 'Fast', description: '…' },
+ *     { title: 'SEO',  description: '…' },
+ *   ]);
+ *   <Features items={features} />
+ *
+ * `key` is `collection::id` or `collection::id::field-prefix`. The value you pass
+ * is the DEFAULT — your code stays the source of truth; any saved edits in the
+ * store overlay it. In editor mode each string leaf is stega-encoded with its
+ * binding key (`collection::id::<dot.path>`), matching the mutation engine's
+ * nested-path writes, so edits round-trip to the same store as data-caret.
+ *
+ * Outside a request (a static build, a prerendered page) the published values
+ * still overlay the default, read from the configured storage, so edits reach
+ * built HTML; nothing is encoded there. A plain import with no CaretCMS runtime
+ * (astro.config, a script) returns the value untouched.
+ */
+import { getRequestContext } from "./runtime/request-context.js";
+import { publishedStorage } from "./runtime/published-storage.js";
+import { stegaCombine } from "./runtime/stega.js";
+import { isEncodableText, isEntryReference } from "./runtime/stega-policy.js";
+import { getNestedValue as getByPath } from "./runtime/utils.js";
+/**
+ * Overlay `override` onto `base` (override wins where defined). Objects merge by
+ * key, arrays merge by index — so a single saved item field overlays only that
+ * leaf and untouched defaults survive. Scalars: override replaces base.
+ *
+ * Saved arrays are sparse: saving `items.1.title` first stores
+ * `items: [null, { title }]`. A null or missing item means "not edited", and
+ * items added beyond the default list (in the Studio) are kept.
+ */
+function deepMerge(base, override) {
+    if (override === undefined || override === null)
+        return base;
+    if (Array.isArray(base) && Array.isArray(override)) {
+        const merged = base.map((item, i) => deepMerge(item, override[i]));
+        for (const added of override.slice(base.length))
+            if (added !== null && added !== undefined)
+                merged.push(added);
+        return merged;
+    }
+    if (base !== null &&
+        typeof base === "object" &&
+        !Array.isArray(base) &&
+        override !== null &&
+        typeof override === "object" &&
+        !Array.isArray(override)) {
+        const out = { ...base };
+        for (const [k, v] of Object.entries(override)) {
+            out[k] = deepMerge(base[k], v);
+        }
+        return out;
+    }
+    return override;
+}
+/**
+ * An imported asset (Astro `ImageMetadata`): `{ src, width, height, format }`.
+ * Its strings are machine identifiers (URL, format token) consumed by the image
+ * pipeline — NOT human-readable text. Stega-encoding them corrupts the value
+ * (e.g. `format: "jpg"` → `"jpg<invisible>"`, which `astro:assets` rejects), so
+ * these objects must pass through `encodeLeaves` untouched.
+ */
+function isAssetLike(value) {
+    if (value === null || typeof value !== "object")
+        return false;
+    const v = value;
+    return (typeof v.src === "string" &&
+        typeof v.width === "number" &&
+        typeof v.height === "number" &&
+        typeof v.format === "string");
+}
+/**
+ * Stega-encode every display string with its full `collection::id::field` key.
+ * Values the page's code compares or routes on (a `key`, `id`, `slug`, `href`,
+ * `icon`, a token like `bread` under `key`, a URL) are left as they are, by the
+ * same rules as automatically bound content (stega-policy.ts): a marker on
+ * `category === section.key` would never match.
+ */
+function encodeLeaves(value, collection, id, fieldPath, fieldName = "") {
+    if (typeof value === "string") {
+        return isEncodableText(value, fieldName)
+            ? stegaCombine(value, `${collection}::${id}::${fieldPath}`)
+            : value;
+    }
+    // Asset descriptors (ImageMetadata) carry identifiers, not editable text —
+    // leave them intact so the image pipeline receives a clean src/format.
+    if (isAssetLike(value) || isEntryReference(value)) {
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map((v, i) => encodeLeaves(v, collection, id, fieldPath ? `${fieldPath}.${i}` : `${i}`, fieldName));
+    }
+    if (value !== null && typeof value === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            out[k] = encodeLeaves(v, collection, id, fieldPath ? `${fieldPath}.${k}` : k, k);
+        }
+        return out;
+    }
+    return value;
+}
+export async function editable(key, value) {
+    const ctx = getRequestContext();
+    const parts = key.split("::");
+    const collection = parts[0];
+    const id = parts[1];
+    const fieldPrefix = parts.slice(2).join("::");
+    if (!collection || !id)
+        return value;
+    const adapter = ctx ? ctx.adapter : await publishedStorage();
+    if (!adapter)
+        return value;
+    // 1. Overlay: merge any saved values over the inline default.
+    let result = value;
+    try {
+        const stored = await adapter.getEntry(collection, id);
+        if (stored && stored.data) {
+            const override = fieldPrefix ? getByPath(stored.data, fieldPrefix) : stored.data;
+            result = deepMerge(value, override);
+        }
+    }
+    catch {
+        // store unavailable → keep the inline default
+    }
+    // 2. Stega: editor only — embed binding keys so it's click-to-edit through
+    //    whatever props/loops the value flows through.
+    if (ctx?.editor) {
+        result = encodeLeaves(result, collection, id, fieldPrefix, fieldPrefix.split(".").pop() ?? "");
+    }
+    return result;
+}
+//# sourceMappingURL=editable.js.map

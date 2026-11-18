@@ -1,0 +1,331 @@
+import { isEditorAuthenticated, getEditorId } from "./auth/session.js";
+import { isDemoModeEnabled, resolveDemoSession } from "./auth/demo-session.js";
+import { getRuntimeServices } from "./providers.js";
+import { runWithRequestContext } from "./request-context.js";
+import { bindPageProps, loadDataFileEntries } from "./content-bindings.js";
+import { rewriteCaretAttributes } from "./rewrite.js";
+import { hasCaretBindings } from "./html-tokens.js";
+import { hasStega, stegaClean } from "./stega.js";
+import { cleanNonContentStega, promoteAttributeStega } from "./stega-attributes.js";
+import { SessionOverlayAdapter } from "./storage/session-overlay-adapter.js";
+import { EDITOR_ID_RE } from "./storage/id-contracts.js";
+import { getDevAuthContext } from "./dev-request-context.js";
+// Side-effect import: registers any user-provided schemas into the schema registry
+import "virtual:caretcms/schemas";
+let _cachedRuntimeEnv;
+let _overlayWarned = false;
+function warnMissingOverlay() {
+    if (_overlayWarned)
+        return;
+    _overlayWarned = true;
+    console.warn("[caretcms] CARET_DEMO_MODE is on but the configured storage adapter does " +
+        "not implement makeSessionOverlay. Demo editor access is disabled to " +
+        "avoid unauthenticated writes to shared storage. Use an adapter with " +
+        "session-overlay support (e.g. the filesystem or Cloudflare KV adapters).");
+}
+/** Is this request for a CMS-owned route (Studio, API, or editor assets)? Those
+ *  pages are infrastructure, so the authed empty-state hint must never show on
+ *  them — only on the live site. Conservative: if the path can't be read, treat
+ *  it as owned (skip the hint). */
+function isCmsOwnedPath(context, mountPath, apiBasePath, includeAssets = true) {
+    const url = context.request?.url;
+    if (!url)
+        return true;
+    let pathname;
+    try {
+        pathname = new URL(url).pathname;
+    }
+    catch {
+        return true;
+    }
+    return (pathname === mountPath ||
+        pathname.startsWith(`${mountPath}/`) ||
+        pathname.startsWith(apiBasePath) ||
+        (includeAssets && pathname.startsWith("/__caret")));
+}
+/** Inject the authenticated empty-state hint before `</body>` (falls back to
+ *  appending). The markup is static — the only interpolation is the normalized,
+ *  config-controlled mount path — so no escaping is required. */
+function injectSigninHint(html, mountPath) {
+    const snippet = `<link rel="stylesheet" href="/__caret/signin-hint.css">` +
+        `<div class="caret-signin-hint" role="status">` +
+        `<span class="caret-signin-hint__dot" aria-hidden="true"></span>` +
+        `<span class="caret-signin-hint__text">Signed in · nothing on this page can be edited here. ` +
+        `<a href="${mountPath}/cms">Open the Studio</a>.` +
+        `</span></div>`;
+    const closeBody = html.toLowerCase().lastIndexOf("</body>");
+    if (closeBody === -1)
+        return html + snippet;
+    return html.slice(0, closeBody) + snippet + html.slice(closeBody);
+}
+const PREVIEW_COOKIE = "caret_preview";
+/** Whether this request opted into draft preview (the editor toggles a cookie).
+ *  Only meaningful for an authenticated editor — the overlay install also
+ *  requires a valid editor id. */
+function isPreviewRequest(context) {
+    return context.cookies?.get(PREVIEW_COOKIE)?.value === "1";
+}
+async function resolveRuntimeEnv() {
+    if (_cachedRuntimeEnv !== undefined)
+        return _cachedRuntimeEnv;
+    try {
+        const moduleId = "cloudflare:workers";
+        const mod = (await import(/* @vite-ignore */ moduleId));
+        _cachedRuntimeEnv = mod.env ?? null;
+    }
+    catch {
+        _cachedRuntimeEnv = null;
+    }
+    return _cachedRuntimeEnv;
+}
+async function authenticateIdentity(adapter, request) {
+    if (!adapter)
+        return null;
+    try {
+        const identity = await adapter.authenticate(request);
+        if (!identity)
+            return null;
+        if (!EDITOR_ID_RE.test(identity.id)) {
+            console.error("[caretcms] Identity adapter returned an unsafe editor id; access denied.");
+            return null;
+        }
+        return {
+            id: identity.id,
+            ...(typeof identity.name === "string" ? { name: identity.name } : {}),
+            ...(typeof identity.email === "string" ? { email: identity.email } : {}),
+            ...(Array.isArray(identity.roles)
+                ? { roles: identity.roles.filter((role) => typeof role === "string") }
+                : {}),
+        };
+    }
+    catch (error) {
+        console.error("[caretcms] Identity adapter authentication failed; access denied.", error);
+        return null;
+    }
+}
+export async function onRequest(context, next) {
+    const services = await getRuntimeServices();
+    const runtimeEnv = await resolveRuntimeEnv();
+    // Worker secrets are bindings, not process.env. Cookie verification happens
+    // while choosing overlays, before the final request context is assembled.
+    // Give that preparation its own scope so it can read this request's secret.
+    return runWithRequestContext({ adapter: services.adapter, uploadHandler: services.uploadHandler,
+        sessionId: null, demoMode: false, runtimeEnv }, () => prepareRequest(context, next, services, runtimeEnv));
+}
+async function prepareRequest(context, next, services, runtimeEnv) {
+    const devAuth = getDevAuthContext(context.request, context.isPrerendered);
+    const authContext = devAuth ?? context;
+    const request = authContext.request ?? new Request("http://localhost/");
+    let adapter = services.adapter;
+    let uploadHandler = services.uploadHandler;
+    let sessionId = null;
+    let editorId = null;
+    let setCookieHeader = null;
+    let overlayActive = false;
+    const demoMode = isDemoModeEnabled(runtimeEnv);
+    const identity = demoMode
+        ? null
+        : await authenticateIdentity(services.identityAdapter, request);
+    if (identity)
+        editorId = identity.id;
+    else if (!demoMode && !services.identityAdapter) {
+        editorId = getEditorId(authContext);
+    }
+    const policyActive = !demoMode && services.identityAdapter?.authorize !== undefined;
+    if (demoMode) {
+        const resolution = resolveDemoSession(authContext, request);
+        sessionId = resolution.sessionId;
+        setCookieHeader = resolution.setCookieHeader;
+        if (services.adapter.makeSessionOverlay) {
+            const overlay = await services.adapter.makeSessionOverlay(sessionId);
+            adapter = new SessionOverlayAdapter(services.adapter, overlay, false);
+            overlayActive = true;
+        }
+        else {
+            warnMissingOverlay();
+        }
+        if (services.uploadHandler.makeSessionWrapper) {
+            uploadHandler = await services.uploadHandler.makeSessionWrapper(sessionId);
+        }
+    }
+    else if ((services.delivery.mode === "static" || policyActive || isPreviewRequest(authContext)) && services.adapter.makeEditorOverlay) {
+        // Draft modes: with static delivery, an authorization policy, or an
+        // editor's preview opt-in (cookie), an authenticated editor reads and
+        // writes through their per-editor overlay on every route, the Studio
+        // included, while the public site keeps seeing the base. Keyed by the
+        // editor id from the session; without one there is no editor, so the base
+        // adapter stays. Publish flushes the overlay.
+        const id = identity?.id
+            ?? (services.identityAdapter ? null : getEditorId(authContext));
+        if (id) {
+            const overlay = await services.adapter.makeEditorOverlay(id);
+            adapter = new SessionOverlayAdapter(services.adapter, overlay);
+            overlayActive = true;
+            editorId = id;
+        }
+    }
+    const decisions = new Map();
+    const authorize = async (action, collection, id) => {
+        const key = JSON.stringify([action, collection, id]);
+        if (!decisions.has(key))
+            decisions.set(key, (async () => {
+                if (!identity || typeof services.identityAdapter?.authorize !== "function")
+                    return false;
+                try {
+                    return (await services.identityAdapter.authorize({ identity: structuredClone(identity), request, action, collection, id })) === true;
+                }
+                catch {
+                    console.error("[caretcms] Authorization policy failed; access denied.");
+                    return false;
+                }
+            })());
+        return decisions.get(key);
+    };
+    const requestContext = {
+        adapter,
+        uploadHandler,
+        sessionId,
+        editorId,
+        identity,
+        identityAuthoritative: services.identityAdapter !== null,
+        ...(policyActive ? { authorize } : {}),
+        demoMode,
+        overlayActive,
+        ...(overlayActive ? { publishedAdapter: services.adapter } : {}),
+        runtimeEnv,
+        editor: false,
+    };
+    return runWithRequestContext(requestContext, async () => {
+        const isEditor = isEditorAuthenticated(authContext);
+        // Demo-overlay editor status depends on the request context (demoMode +
+        // overlayActive), so it can only be resolved here, inside the ALS scope.
+        // Mutate the live context object so the loaders see the gate during render.
+        requestContext.editor = isEditor;
+        // Content read at build time (data files, getStaticPaths props) gets the
+        // stored values on every rendered request: editors see their drafts, and
+        // visitors of a server-rendered site see edits published after the build.
+        if (isEditor || (!context.isPrerendered && !isCmsOwnedPath(context, services.mountPath, services.apiBasePath, true))) {
+            try {
+                requestContext.dataFiles = await loadDataFileEntries(adapter);
+            }
+            catch (error) {
+                console.warn("[caretcms] Stored data-file values unavailable:", error);
+            }
+            try {
+                await bindPageProps(context.props);
+            }
+            catch (error) {
+                console.warn("[caretcms] Page props couldn't be bound:", error);
+            }
+        }
+        context.locals.isEditor = isEditor;
+        context.locals.caretIdentity = identity;
+        // A downstream 304 has no body to rewrite and may validate a public source
+        // representation against a private draft. Render afresh for editors.
+        // Prerendered pages have no request headers (Astro warns on reading them).
+        if (isEditor && !context.isPrerendered && context.request && (context.request.headers.has("if-none-match") || context.request.headers.has("if-modified-since"))) {
+            const headers = new Headers(context.request.headers);
+            headers.delete("if-none-match");
+            headers.delete("if-modified-since");
+            context.request = new Request(context.request, { headers });
+        }
+        const inner = await next();
+        const contentType = inner.headers.get("content-type") ?? "";
+        const contentEncoding = inner.headers.get("content-encoding") ?? "";
+        // Skip compressed bodies — calling .text() on a gzip/brotli stream
+        // returns binary garbage, which then either fails the data-caret probe
+        // (silent corruption) or injects rewrites into a non-text payload.
+        // Identity / empty are the only encodings safe to decode as text.
+        const isIdentity = contentEncoding === "" || contentEncoding.toLowerCase() === "identity";
+        const isHtml = contentType.includes("text/html") && isIdentity;
+        let body = inner.body;
+        let bodyConsumed = false;
+        let rewritten = false;
+        if (isHtml) {
+            let html = await inner.text();
+            bodyConsumed = true;
+            // Probe for ATTRIBUTE syntax, not the bare substring: a page that merely
+            // mentions data-caret in prose (docs, a blog post about the CMS) must not
+            // run the rewrite engine or suppress the signed-in empty-state hint.
+            // Use actual element attributes, including Markdown body stamps.
+            // Keys hidden in attribute values (image src, link href) would otherwise
+            // reach the browser inside the URL. Clean them and bind keyed images.
+            if (requestContext.editor && hasStega(html)) {
+                const promoted = promoteAttributeStega(cleanNonContentStega(html));
+                if (promoted !== html) {
+                    html = promoted;
+                    rewritten = true;
+                }
+            }
+            const hasBindings = hasCaretBindings(html);
+            // Stega in the page becomes bindings in the browser (stega-hydrate), so
+            // it counts as editable content for the empty-state hint below.
+            const hasHiddenBindings = requestContext.editor && hasStega(html);
+            if (hasBindings) {
+                // An authenticated editor in server delivery reads live base content
+                // (field edits save straight through), but their inline BODY-block
+                // edits are always deferred drafts. Preview those on the editor's own
+                // requests so a reload shows staged prose instead of silently
+                // reverting to the source. ONLY the rewrite needs the overlay — it
+                // injects the drafted `__body` HTML into stamped blocks — so loaders
+                // and field writes keep using the base adapter and "changes save
+                // directly" still holds. Demo/preview already overlay everything via
+                // `adapter`; the public (editor === false) always reads the base.
+                let rewriteAdapter = adapter;
+                if (!overlayActive && requestContext.editor && services.adapter.makeEditorOverlay) {
+                    const id = editorId ?? getEditorId(authContext);
+                    if (id) {
+                        rewriteAdapter = new SessionOverlayAdapter(services.adapter, await services.adapter.makeEditorOverlay(id));
+                    }
+                }
+                html = await rewriteCaretAttributes(html, rewriteAdapter, {
+                    allowedClasses: services.allowedClasses,
+                });
+                rewritten = true;
+            }
+            // Backstop: strip stega metadata from published output so non-editors
+            // never receive the invisible characters, even if a value was encoded
+            // outside the loader's editor gate. Editors keep it — the overlay decodes
+            // it for click-to-edit.
+            if (!requestContext.editor && hasStega(html)) {
+                html = stegaClean(html);
+                rewritten = true;
+            }
+            // Authenticated empty-state hint: a signed-in editor landing on a live
+            // page with zero data-caret bindings would otherwise get no signal that
+            // anything happened (reads as "broken"). Show a small affordance pointing
+            // at caretize / the Studio. Editors-only and skipped on CMS-owned pages,
+            // so the public never sees it and it never clutters the Studio.
+            if (services.enableInlineEditor &&
+                requestContext.editor &&
+                !hasBindings &&
+                !hasHiddenBindings &&
+                !isCmsOwnedPath(context, services.mountPath, services.apiBasePath)) {
+                html = injectSigninHint(html, services.mountPath);
+                rewritten = true;
+            }
+            body = html;
+        }
+        const privateResponse = isEditor || overlayActive || Boolean(setCookieHeader)
+            || Boolean(context.request && isCmsOwnedPath(context, services.mountPath, services.apiBasePath, false));
+        if (!bodyConsumed && !setCookieHeader && !privateResponse) {
+            return inner;
+        }
+        const headers = new Headers(inner.headers);
+        if (privateResponse) {
+            headers.set("Cache-Control", "private, no-store");
+            headers.delete("cdn-cache-control");
+            headers.delete("surrogate-control");
+        }
+        if (rewritten || privateResponse) {
+            headers.delete("etag");
+            headers.delete("last-modified");
+        }
+        if (rewritten)
+            headers.delete("content-length");
+        if (setCookieHeader)
+            headers.append("Set-Cookie", setCookieHeader);
+        return new Response(body, { status: inner.status, headers });
+    });
+}
+//# sourceMappingURL=middleware.js.map
